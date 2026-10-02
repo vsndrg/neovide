@@ -149,6 +149,7 @@ objc2-app-kit = { version = "0.3.1", default-features = false, features = [
   "NSWorkspace",
   "block2",
   "objc2-core-foundation",
+  "objc2-core-graphics",
   "objc2-quartz-core",
   "std",
 ] }
@@ -159,6 +160,8 @@ objc2-core-graphics = { version = "0.3.1", default-features = false, features = 
   "CGColor",
   "CGPath",
   "CGDirectDisplay",
+  "CGEvent",
+  "CGEventTypes",
 ] }
 objc2-core-video = { version = "0.3.1", default-features = false, features = [
   "CVBase",
@@ -171,6 +174,7 @@ objc2-foundation = { version = "0.3.1", default-features = false, features = [
   "NSAttributedString",
   "NSDictionary",
   "NSProcessInfo",
+  "NSRunLoop",
   "NSString",
   "NSTimer",
   "NSURL",
@@ -184,6 +188,7 @@ objc2-metal = { version = "0.3.1", default-features = false, features = [
   "std",
 ] }
 objc2-quartz-core = { version = "0.3.1", default-features = false, features = [
+  "CADisplayLink",
   "CALayer",
   "CAShapeLayer",
   "CAMetalLayer",

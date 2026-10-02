@@ -1,6 +1,7 @@
 pub mod settings;
 mod switcher;
 mod webview;
+mod wheel_resampler;
 
 use webview::WebviewManager;
 pub use webview::WebviewPlacement;

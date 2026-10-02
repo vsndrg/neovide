@@ -9,23 +9,32 @@
 //! Keyboard: while a webview is first responder, only the keys Nvim declared for it (plus
 //! Cmd+C / Cmd+A for selections) reach the page. Every other key event is handed to the editor
 //! view synchronously, so it enters Nvim's input in order with the keys typed after it.
+//!
+//! Trackpad: the events of a scroll gesture reach WebKit resampled to the display, one per frame
+//! (see `wheel_resampler`).
 
 use std::{cell::RefCell, collections::HashMap};
 
 use glamour::Intersection;
 
 use objc2::{
-    DefinedClass, MainThreadOnly, define_class, msg_send,
+    DefinedClass, MainThreadOnly, Message, define_class, msg_send,
     rc::{Retained, Weak},
     runtime::ProtocolObject,
+    sel,
 };
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSResponder, NSView, NSWindow};
-use objc2_core_graphics::CGMutablePath;
+use objc2_app_kit::{
+    NSEvent, NSEventModifierFlags, NSEventPhase, NSResponder, NSScreen, NSView, NSWindow,
+};
+use objc2_core_foundation::CGPoint;
+use objc2_core_graphics::{CGEvent, CGEventField, CGMutablePath};
 use objc2_foundation::{
-    MainThreadMarker, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
-    NSURL, ns_string,
+    MainThreadMarker, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop,
+    NSRunLoopCommonModes, NSSize, NSString, NSURL, ns_string,
 };
-use objc2_quartz_core::{CAShapeLayer, CATransaction};
+use objc2_quartz_core::{CADisplayLink, CAShapeLayer, CATransaction};
+
+use super::wheel_resampler::WheelResampler;
 use objc2_web_kit::{
     WKScriptMessage, WKScriptMessageHandler, WKUserContentController, WKWebView,
     WKWebViewConfiguration,
@@ -200,7 +209,21 @@ struct KeyRoutingIvars {
     id: u64,
     neovim_handler: NeovimHandler,
     page_keys: RefCell<Vec<KeySpec>>,
+    wheel: RefCell<WheelGesture>,
 }
+
+/// The trackpad gesture being resampled.
+#[derive(Debug, Default)]
+struct WheelGesture {
+    resampler: WheelResampler,
+    /// Latest event of the gesture: what resampled events are copied from.
+    template: Option<Retained<NSEvent>>,
+    /// Ticks while a gesture is resampled (it retains the view, so it is invalidated after).
+    link: Option<Retained<CADisplayLink>>,
+}
+
+/// `kCGScrollWheelEventScrollPhase` value of a gesture's ongoing events.
+const CG_SCROLL_PHASE_CHANGED: i64 = 2;
 
 define_class!(
     #[derive(Debug)]
@@ -246,6 +269,16 @@ define_class!(
             resigned
         }
 
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            self.on_scroll_wheel(event);
+        }
+
+        #[unsafe(method(wheelFrame:))]
+        fn wheel_frame(&self, link: &CADisplayLink) {
+            self.on_wheel_frame(link);
+        }
+
         // Cmd shortcuts go through key equivalents first: keep the ones the page does not own
         // away from WebKit so they reach Nvim through keyDown: above.
         #[unsafe(method(performKeyEquivalent:))]
@@ -270,6 +303,7 @@ impl KeyRoutingWebView {
             id,
             neovim_handler,
             page_keys: RefCell::new(Vec::new()),
+            wheel: RefCell::new(WheelGesture::default()),
         });
         unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO, configuration: configuration] }
     }
@@ -287,6 +321,191 @@ impl KeyRoutingWebView {
         self.window()
             .and_then(|window| window.firstResponder())
             .is_some_and(|responder| is_descendant_responder(&responder, self))
+    }
+
+    // A trackpad gesture's own events (phase began/changed/ended) are resampled; mouse wheels,
+    // the momentum the system generates after a flick (already even) and anything outside a
+    // gesture go to WebKit as they come.
+    fn on_scroll_wheel(&self, event: &NSEvent) {
+        let phase = event.phase();
+        let resampled = event.hasPreciseScrollingDeltas()
+            && event.momentumPhase().is_empty()
+            && phase.intersects(
+                NSEventPhase::Began
+                    | NSEventPhase::Changed
+                    | NSEventPhase::Stationary
+                    | NSEventPhase::Ended
+                    | NSEventPhase::Cancelled,
+            );
+        if !resampled {
+            self.end_wheel_gesture(None);
+            unsafe { msg_send![super(self), scrollWheel: event] }
+            return;
+        }
+        let time = event.timestamp();
+        let delta = [event.scrollingDeltaX(), event.scrollingDeltaY()];
+        if phase.contains(NSEventPhase::Began) {
+            self.end_wheel_gesture(None);
+            self.begin_wheel_gesture(time);
+            unsafe { msg_send![super(self), scrollWheel: event] }
+            return;
+        }
+        if !self.ivars().wheel.borrow().resampler.is_active() {
+            unsafe { msg_send![super(self), scrollWheel: event] }
+            return;
+        }
+        {
+            let mut wheel = self.ivars().wheel.borrow_mut();
+            wheel.resampler.sample(time, delta);
+            wheel.template = Some(event.retain());
+        }
+        if phase.intersects(NSEventPhase::Ended | NSEventPhase::Cancelled) {
+            // The ending event carries whatever the frames have not handed out yet.
+            self.end_wheel_gesture(Some(event));
+        }
+    }
+
+    fn begin_wheel_gesture(&self, time: f64) {
+        let link = unsafe { self.displayLinkWithTarget_selector(self, sel!(wheelFrame:)) };
+        unsafe { link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes) };
+        let mut wheel = self.ivars().wheel.borrow_mut();
+        wheel.resampler.begin(time);
+        wheel.link = Some(link);
+    }
+
+    /// Ends the resampled gesture, if any, handing out the rest of its input with `last` (the
+    /// gesture's ending event), or with its latest event.
+    fn end_wheel_gesture(&self, last: Option<&NSEvent>) {
+        let (rest, template) = {
+            let mut wheel = self.ivars().wheel.borrow_mut();
+            if let Some(link) = wheel.link.take() {
+                link.invalidate();
+            }
+            if !wheel.resampler.is_active() {
+                return;
+            }
+            let rest = wheel.resampler.finish();
+            (rest, wheel.template.take())
+        };
+        match last {
+            Some(event) => self.send_wheel(event, rest, None, None),
+            None if rest != [0.0; 2] => {
+                if let Some(template) = template {
+                    self.send_wheel(&template, rest, Some(CG_SCROLL_PHASE_CHANGED), None);
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn on_wheel_frame(&self, link: &CADisplayLink) {
+        let target = link.targetTimestamp();
+        let (step, template, idle) = {
+            let mut wheel = self.ivars().wheel.borrow_mut();
+            if !wheel.resampler.is_active() {
+                return;
+            }
+            let step = wheel.resampler.frame(target, target - link.timestamp());
+            (step, wheel.template.clone(), wheel.resampler.is_idle(target))
+        };
+        if let Some(template) = template
+            && step != [0.0; 2]
+        {
+            self.send_wheel(&template, step, Some(CG_SCROLL_PHASE_CHANGED), Some(target));
+        }
+        // A gesture whose end never arrived (focus moved away mid-gesture) stops here.
+        if idle && self.window().is_none_or(|window| !window.isKeyWindow()) {
+            self.end_wheel_gesture(None);
+        }
+    }
+
+    /// Hands WebKit a copy of `template` carrying `delta` ([x, y], px), optionally with another
+    /// gesture phase and timestamp.
+    fn send_wheel(
+        &self,
+        template: &NSEvent,
+        delta: [f64; 2],
+        phase: Option<i64>,
+        time: Option<f64>,
+    ) {
+        let Some(source) = template.CGEvent() else {
+            return;
+        };
+        let Some(copy) = CGEvent::new_copy(Some(&source)) else {
+            return;
+        };
+        let event = Some(&*copy);
+        let axes = [
+            (
+                delta[1],
+                CGEventField::ScrollWheelEventDeltaAxis1,
+                CGEventField::ScrollWheelEventFixedPtDeltaAxis1,
+                CGEventField::ScrollWheelEventPointDeltaAxis1,
+            ),
+            (
+                delta[0],
+                CGEventField::ScrollWheelEventDeltaAxis2,
+                CGEventField::ScrollWheelEventFixedPtDeltaAxis2,
+                CGEventField::ScrollWheelEventPointDeltaAxis2,
+            ),
+        ];
+        for (pixels, line_field, fixed_field, point_field) in axes {
+            // Each field is derived from the ones set after it: writing the whole lines last
+            // turned the pixel delta into 8 px per line. So lines, fractional lines, then pixels,
+            // in the template's lines-per-pixel ratio.
+            let template_pixels = CGEvent::double_value_field(event, point_field);
+            let ratio = if template_pixels != 0.0 {
+                CGEvent::double_value_field(event, fixed_field) / template_pixels
+            } else {
+                0.1
+            };
+            let lines = pixels * ratio;
+            CGEvent::set_integer_value_field(event, line_field, lines.round() as i64);
+            CGEvent::set_double_value_field(event, fixed_field, lines);
+            CGEvent::set_double_value_field(event, point_field, pixels);
+        }
+        if let Some(phase) = phase {
+            CGEvent::set_integer_value_field(
+                event,
+                CGEventField::ScrollWheelEventScrollPhase,
+                phase,
+            );
+        }
+        if let Some(time) = time {
+            // CGEvent timestamps count in other units than NSEvent's seconds; scale by the
+            // template's pair.
+            let (cg, ns) = (CGEvent::timestamp(event) as f64, template.timestamp());
+            if ns > 0.0 {
+                CGEvent::set_timestamp(event, (time * cg / ns) as u64);
+            }
+        }
+        let Some(mut synthesized) = NSEvent::eventWithCGEvent(&copy) else {
+            return;
+        };
+        let mtm = MainThreadMarker::from(self);
+        if synthesized.window(mtm).is_none() {
+            // Without a window, AppKit reports the screen point as the location in the window.
+            // Place it so that it is the template's location in the window.
+            let Some(screen) = NSScreen::screens(mtm).firstObject() else {
+                return;
+            };
+            let location = template.locationInWindow();
+            CGEvent::set_location(
+                event,
+                CGPoint::new(location.x, screen.frame().size.height - location.y),
+            );
+            let Some(placed) = NSEvent::eventWithCGEvent(&copy) else {
+                return;
+            };
+            synthesized = placed;
+        }
+        unsafe { msg_send![super(self), scrollWheel: &*synthesized] }
+    }
+
+    fn stop_wheel(&self) {
+        if let Some(link) = self.ivars().wheel.borrow_mut().link.take() {
+            link.invalidate();
+        }
     }
 
     fn give_focus_to_editor(&self) -> Option<Retained<NSView>> {
@@ -503,6 +722,7 @@ impl WebviewManager {
                 .userContentController()
                 .removeScriptMessageHandlerForName(&NSString::from_str(MESSAGE_HANDLER_NAME));
         }
+        pane.view.stop_wheel();
         pane.view.removeFromSuperview();
         drop(pane.handler);
         if had_focus {
