@@ -234,6 +234,9 @@ impl WebviewManager {
         let handler = WebviewMessageHandler::new(mtm, id, neovim_handler.clone(), ns_window);
         let view = unsafe {
             let configuration = WKWebViewConfiguration::new(mtm);
+            // WebKit throttles page rendering updates (rAF, scroll commits) to ~60 fps even on
+            // 120 Hz displays unless this feature flag is off.
+            set_webkit_feature(&configuration, "PreferPageRenderingUpdatesNear60FPSEnabled", false);
             configuration.userContentController().addScriptMessageHandler_name(
                 ProtocolObject::from_ref(&*handler),
                 &NSString::from_str(MESSAGE_HANDLER_NAME),
@@ -343,6 +346,38 @@ impl WebviewManager {
         }
         CATransaction::commit();
     }
+}
+
+/// Toggles a WebKit feature flag (the switches behind Safari's Feature Flags settings) through
+/// `+[WKPreferences _features]` / `-[WKPreferences _setEnabled:forFeature:]`. These are SPI;
+/// when they are missing the flag is left at its default.
+fn set_webkit_feature(configuration: &WKWebViewConfiguration, key: &str, enabled: bool) {
+    use objc2::runtime::{AnyClass, AnyObject, Sel};
+    use objc2::sel;
+    use objc2_foundation::NSArray;
+
+    let preferences = unsafe { configuration.preferences() };
+    let class: &AnyClass = preferences.class();
+    let features_sel: Sel = sel!(_features);
+    let set_sel: Sel = sel!(_setEnabled:forFeature:);
+    // `_features` is a class method: ask the class object, not its instances.
+    let has_api: bool = unsafe { msg_send![class, respondsToSelector: features_sel] }
+        && unsafe { msg_send![&*preferences, respondsToSelector: set_sel] };
+    if !has_api {
+        log::warn!("webview: WKPreferences feature SPI unavailable, cannot set {key}");
+        return;
+    }
+    let features: Retained<NSArray<AnyObject>> = unsafe { msg_send![class, _features] };
+    for feature in features.iter() {
+        let feature_key: Retained<NSString> = unsafe { msg_send![&*feature, key] };
+        if feature_key.to_string() == key {
+            unsafe {
+                let _: () = msg_send![&*preferences, _setEnabled: enabled, forFeature: &*feature];
+            }
+            return;
+        }
+    }
+    log::warn!("webview: WebKit feature {key} not found");
 }
 
 fn load_file(view: &WKWebView, path: &str) {
