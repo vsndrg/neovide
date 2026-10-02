@@ -123,7 +123,7 @@ pub enum WebviewCommand {
     Open { id: u64, winid: u64, url: String },
     SetWindow { id: u64, winid: u64 },
     Post { id: u64, message: String },
-    Focus { id: u64, focus: bool },
+    Focus { id: u64, focus: bool, keys: Vec<String> },
     Close { id: u64 },
 }
 

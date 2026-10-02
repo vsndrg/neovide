@@ -364,7 +364,14 @@ fn parse_webview_command(action: &str, arguments: &[Value]) -> Option<WebviewCom
         },
         "set_window" => WebviewCommand::SetWindow { id, winid: arg(1)?.as_u64()? },
         "post" => WebviewCommand::Post { id, message: arg(1)?.as_str()?.to_string() },
-        "focus" => WebviewCommand::Focus { id, focus: arg(1)?.as_bool()? },
+        "focus" => WebviewCommand::Focus {
+            id,
+            focus: arg(1)?.as_bool()?,
+            keys: arg(2)
+                .and_then(Value::as_array)
+                .map(|keys| keys.iter().filter_map(|k| k.as_str().map(str::to_owned)).collect())
+                .unwrap_or_default(),
+        },
         "close" => WebviewCommand::Close { id },
         _ => return None,
     })

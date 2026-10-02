@@ -367,7 +367,9 @@ impl MacosWindowFeature {
             }
             WebviewCommand::SetWindow { id, winid } => self.webviews.set_window(id, winid),
             WebviewCommand::Post { id, message } => self.webviews.post(id, &message),
-            WebviewCommand::Focus { id, focus } => self.webviews.focus(&self.ns_window, id, focus),
+            WebviewCommand::Focus { id, focus, keys } => {
+                self.webviews.focus(&self.ns_window, id, focus, &keys)
+            }
             WebviewCommand::Close { id } => self.webviews.close(&self.ns_window, id),
         }
     }
