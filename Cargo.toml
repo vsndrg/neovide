@@ -157,6 +157,7 @@ objc2-core-foundation = { version = "0.3.1", default-features = false, features 
 ] }
 objc2-core-graphics = { version = "0.3.1", default-features = false, features = [
   "CGColor",
+  "CGPath",
   "CGDirectDisplay",
 ] }
 objc2-core-video = { version = "0.3.1", default-features = false, features = [
@@ -174,6 +175,7 @@ objc2-foundation = { version = "0.3.1", default-features = false, features = [
   "NSTimer",
   "NSURL",
   "NSUserDefaults",
+  "NSValue",
   "std",
 ] }
 objc2-metal = { version = "0.3.1", default-features = false, features = [
@@ -183,11 +185,26 @@ objc2-metal = { version = "0.3.1", default-features = false, features = [
 ] }
 objc2-quartz-core = { version = "0.3.1", default-features = false, features = [
   "CALayer",
+  "CAShapeLayer",
   "CAMetalLayer",
   "CATransaction",
   "objc2-core-foundation",
   "objc2-core-graphics",
   "objc2-metal",
+  "std",
+] }
+objc2-web-kit = { version = "0.3.1", default-features = false, features = [
+  "WKFrameInfo",
+  "WKScriptMessage",
+  "WKScriptMessageHandler",
+  "WKUserContentController",
+  "WKWebView",
+  "WKWebViewConfiguration",
+  "WKPreferences",
+  "WKNavigation",
+  "block2",
+  "objc2-app-kit",
+  "objc2-core-foundation",
   "std",
 ] }
 skia-safe = { version = "0.97.2", features = ["gl", "metal", "textlayout"] }

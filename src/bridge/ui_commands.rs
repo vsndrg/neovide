@@ -276,6 +276,7 @@ pub enum ParallelCommand {
     SetBackground { background: String },
     FlushStartupMessages { messages: Vec<StartupMessage> },
     ReplayStartupMessages { messages: Vec<StartupMessage> },
+    WebviewMessage { id: u64, message: String },
 }
 
 async fn display_available_fonts(
@@ -452,6 +453,11 @@ impl ParallelCommand {
                 // We should go back to it whenever that bug gets fixed.
                 show_error_message(nvim, &lines).await.context("ShowError failed")
             }
+            ParallelCommand::WebviewMessage { id, message } => nvim
+                .exec_lua("neovide.private.webview_message(...)", call_args![id as i64, message])
+                .await
+                .map(|_| ())
+                .context("WebviewMessage failed"),
             ParallelCommand::SetBackground { background } => {
                 set_background_if_allowed(&background, nvim).await;
                 Ok(())

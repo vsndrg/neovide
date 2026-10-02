@@ -311,6 +311,53 @@ M.private.can_set_background = function()
     end
 end
 
+-- Native webviews overlaid on Nvim windows (macOS). A webview follows the window `winid`: it is
+-- moved with it every frame, hidden while the window is not displayed, and masked below floating
+-- windows. Page script receives messages through `window.neovideReceive(string)` and replies with
+-- `window.webkit.messageHandlers.neovide.postMessage(string)`, delivered to `on_message[id]`.
+M.webview = {
+    ---@type table<integer, fun(message: string)>
+    on_message = {},
+}
+
+---@param id integer caller-chosen identifier
+---@param winid integer window to cover
+---@param path string HTML file to load
+M.webview.open = function(id, winid, path)
+    pcall(rpcnotify, "neovide.webview.open", id, winid, path)
+end
+
+---@param id integer
+---@param winid integer
+M.webview.set_window = function(id, winid)
+    pcall(rpcnotify, "neovide.webview.set_window", id, winid)
+end
+
+---@param id integer
+---@param message string
+M.webview.post = function(id, message)
+    pcall(rpcnotify, "neovide.webview.post", id, message)
+end
+
+---@param id integer
+---@param focus boolean give keyboard focus to the webview (true) or back to Nvim (false)
+M.webview.focus = function(id, focus)
+    pcall(rpcnotify, "neovide.webview.focus", id, focus)
+end
+
+---@param id integer
+M.webview.close = function(id)
+    M.webview.on_message[id] = nil
+    pcall(rpcnotify, "neovide.webview.close", id)
+end
+
+M.private.webview_message = function(id, message)
+    local handler = M.webview.on_message[id]
+    if handler then
+        handler(message)
+    end
+end
+
 M.disable_redraw = function()
     -- Wrap inside pcall to avoid errors if Neovide disconnects
     pcall(rpcnotify, "neovide.set_redraw", false)

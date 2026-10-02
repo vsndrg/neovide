@@ -67,6 +67,8 @@ pub enum WindowDrawCommand {
         right: u64,
     },
     SortOrder(SortOrder),
+    /// The Nvim window handle (`winid`) displayed in this grid.
+    Handle(u64),
 }
 
 struct RenderedLine {
@@ -86,6 +88,8 @@ struct TrailingFillRect {
 
 pub struct RenderedWindow {
     pub id: u64,
+    /// Nvim window handle (`winid`), known once a `win_pos` event arrived.
+    pub window_handle: Option<u64>,
     valid: bool,
     pub hidden: bool,
     pub anchor_info: Option<AnchorInfo>,
@@ -127,6 +131,7 @@ impl RenderedWindow {
         let grid_position = GridPos::ZERO;
         RenderedWindow {
             id,
+            window_handle: None,
             valid: false,
             hidden: false,
             anchor_info: None,
@@ -738,6 +743,9 @@ impl RenderedWindow {
                 if let Some(anchor_info) = self.anchor_info.as_mut() {
                     anchor_info.sort_order = sort_order;
                 }
+            }
+            WindowDrawCommand::Handle(handle) => {
+                self.window_handle = Some(handle);
             }
             _ => {}
         };

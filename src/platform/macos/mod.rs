@@ -1,5 +1,9 @@
 pub mod settings;
 mod switcher;
+mod webview;
+
+use webview::WebviewManager;
+pub use webview::WebviewPlacement;
 
 pub use switcher::{
     EditorSwitcherRow, close_editor_switcher_if_open, editor_switcher_key_event_matches,
@@ -351,9 +355,32 @@ pub struct MacosWindowFeature {
     neovim_handler: NeovimHandler,
     simple_fullscreen: bool,
     has_transparent_titlebar: bool,
+    webviews: WebviewManager,
 }
 
 impl MacosWindowFeature {
+    pub fn handle_webview_command(&mut self, command: crate::window::WebviewCommand) {
+        use crate::window::WebviewCommand;
+        match command {
+            WebviewCommand::Open { id, winid, url } => {
+                self.webviews.open(&self.ns_window, &self.neovim_handler, id, winid, &url)
+            }
+            WebviewCommand::SetWindow { id, winid } => self.webviews.set_window(id, winid),
+            WebviewCommand::Post { id, message } => self.webviews.post(id, &message),
+            WebviewCommand::Focus { id, focus } => self.webviews.focus(&self.ns_window, id, focus),
+            WebviewCommand::Close { id } => self.webviews.close(&self.ns_window, id),
+        }
+    }
+
+    pub fn has_webviews(&self) -> bool {
+        !self.webviews.is_empty()
+    }
+
+    pub fn sync_webviews(&mut self, placement: impl Fn(u64) -> Option<WebviewPlacement>) {
+        let scale_factor = self.ns_window.backingScaleFactor();
+        self.webviews.sync(scale_factor, placement);
+    }
+
     pub fn from_winit_window(
         window: &Window,
         settings: Arc<Settings>,
@@ -439,6 +466,7 @@ impl MacosWindowFeature {
             neovim_handler,
             simple_fullscreen,
             has_transparent_titlebar,
+            webviews: WebviewManager::default(),
         };
 
         let mut macos_window_feature = macos_window_feature;

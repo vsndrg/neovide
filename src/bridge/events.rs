@@ -311,6 +311,8 @@ pub enum RedrawEvent {
     /// previously hidden, it should now be shown again.
     WindowPosition {
         grid: u64,
+        /// Nvim window handle (`winid`) shown in this grid.
+        window: Option<u64>,
         start_row: u64,
         start_column: u64,
         width: u64,
@@ -859,16 +861,24 @@ fn parse_grid_scroll(grid_scroll_arguments: Vec<Value>) -> Result<RedrawEvent> {
 }
 
 fn parse_win_pos(win_pos_arguments: Vec<Value>) -> Result<RedrawEvent> {
-    let [grid, _window, start_row, start_column, width, height] =
-        extract_values(win_pos_arguments)?;
+    let [grid, window, start_row, start_column, width, height] = extract_values(win_pos_arguments)?;
 
     Ok(RedrawEvent::WindowPosition {
         grid: parse_u64(grid)?,
+        window: parse_window_handle(&window),
         start_row: parse_u64(start_row)?,
         start_column: parse_u64(start_column)?,
         width: parse_u64(width)?,
         height: parse_u64(height)?,
     })
+}
+
+/// Decodes a `Window` msgpack ext value (a handle encoded as a msgpack integer).
+fn parse_window_handle(value: &Value) -> Option<u64> {
+    match value {
+        Value::Ext(_, bytes) => rmpv::decode::read_value(&mut bytes.as_slice()).ok()?.as_u64(),
+        value => value.as_u64(),
+    }
 }
 
 fn parse_window_anchor(value: Value) -> Result<WindowAnchor> {
@@ -1184,7 +1194,23 @@ pub fn parse_progress_bar_event(value: Option<&Value>) -> Option<UserEvent> {
 mod tests {
     use rmpv::Value;
 
-    use super::{MessageKind, RedrawEvent, parse_msg_show};
+    use super::{MessageKind, RedrawEvent, parse_msg_show, parse_win_pos};
+
+    #[test]
+    fn win_pos_decodes_window_handle_ext() {
+        // Window handles arrive as msgpack ext values wrapping an integer (1000 = 0xcd 0x03 0xe8).
+        let window = Value::Ext(1, vec![0xcd, 0x03, 0xe8]);
+        let event = parse_win_pos(vec![
+            Value::from(2),
+            window,
+            Value::from(0),
+            Value::from(40),
+            Value::from(80),
+            Value::from(24),
+        ])
+        .unwrap();
+        assert!(matches!(event, RedrawEvent::WindowPosition { grid: 2, window: Some(1000), .. }));
+    }
 
     #[test]
     fn message_kind_marks_error_variants() {

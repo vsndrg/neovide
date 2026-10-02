@@ -25,7 +25,7 @@ use crate::{
     error_handling::ResultPanicExplanation,
     running_tracker::RunningTracker,
     settings::{FontConfigState, Settings},
-    window::{EventPayload, RouteId, UserEvent, WindowCommand},
+    window::{EventPayload, RouteId, UserEvent, WebviewCommand, WindowCommand},
 };
 
 use super::ui_commands::UiCommand;
@@ -286,6 +286,14 @@ impl Handler for NeovimHandler {
                 }
                 None => warn!("neovide.force_click called with invalid arguments: {arguments:?}"),
             },
+            name if name.starts_with("neovide.webview.") => {
+                match parse_webview_command(&name["neovide.webview.".len()..], &arguments) {
+                    Some(command) => {
+                        self.send_window_command(WindowCommand::Webview(command));
+                    }
+                    None => warn!("{name} called with invalid arguments: {arguments:?}"),
+                }
+            }
             "neovide.exec_detach_handler" => {
                 send_ui(ParallelCommand::Quit, self);
             }
@@ -343,6 +351,23 @@ fn parse_force_click_args(
     let kind = ForceClickKind::from(kind_str);
 
     Some((col, row, entity, guifont, kind))
+}
+
+fn parse_webview_command(action: &str, arguments: &[Value]) -> Option<WebviewCommand> {
+    let id = arguments.first()?.as_u64()?;
+    let arg = |i: usize| arguments.get(i);
+    Some(match action {
+        "open" => WebviewCommand::Open {
+            id,
+            winid: arg(1)?.as_u64()?,
+            url: arg(2)?.as_str()?.to_string(),
+        },
+        "set_window" => WebviewCommand::SetWindow { id, winid: arg(1)?.as_u64()? },
+        "post" => WebviewCommand::Post { id, message: arg(1)?.as_str()?.to_string() },
+        "focus" => WebviewCommand::Focus { id, focus: arg(1)?.as_bool()? },
+        "close" => WebviewCommand::Close { id },
+        _ => return None,
+    })
 }
 
 #[cfg(target_os = "macos")]

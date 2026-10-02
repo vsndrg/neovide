@@ -615,6 +615,20 @@ impl WinitWindowWrapper {
                     macos_feature.borrow_mut().show_find_indicator_for_rect(rect, text.as_deref());
                 }
             }
+            #[cfg(target_os = "macos")]
+            WindowCommand::Webview(command) => {
+                if let Some(feature) = self.macos_feature_for_window(target_window_id) {
+                    feature.borrow_mut().handle_webview_command(command);
+                }
+                // Place the new/retargeted webview right away.
+                if let Some(route) = self.routes.get(&target_window_id) {
+                    route.window.winit_window.request_redraw();
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            WindowCommand::Webview(_) => {
+                log::warn!("neovide.webview is only supported on macOS");
+            }
             WindowCommand::Minimize => {
                 self.minimize_window();
                 if let Some(route) = self.routes.get_mut(&target_window_id) {
@@ -1458,6 +1472,15 @@ impl WinitWindowWrapper {
         }
 
         skia_renderer.swap_buffers();
+
+        #[cfg(target_os = "macos")]
+        if let Some(feature) = route.window.macos_feature.as_ref() {
+            let mut feature = feature.borrow_mut();
+            if feature.has_webviews() {
+                feature.sync_webviews(|winid| webview_placement(&renderer, winid));
+            }
+        }
+
         if self.ui_state == UIState::FirstFrame {
             window.set_visible(true);
             self.ui_state = UIState::Showing;
@@ -2866,4 +2889,28 @@ impl WinitWindowWrapper {
             skia_renderer.window().set_title_text_color(winit_color);
         }
     }
+}
+
+/// Pixel region of the Nvim window `winid` as drawn this frame, plus the floating windows on top.
+#[cfg(target_os = "macos")]
+fn webview_placement(
+    renderer: &crate::renderer::Renderer,
+    winid: u64,
+) -> Option<crate::platform::macos::WebviewPlacement> {
+    let is_float =
+        |grid: u64| renderer.rendered_windows.get(&grid).is_some_and(|w| w.anchor_info.is_some());
+    // window_regions holds the visible windows in draw order: roots, then floats bottom-up.
+    let index = renderer.window_regions.iter().position(|details| {
+        renderer
+            .rendered_windows
+            .get(&details.id)
+            .is_some_and(|window| window.window_handle == Some(winid))
+    })?;
+    let region = renderer.window_regions[index].region;
+    let occluders = renderer.window_regions[index + 1..]
+        .iter()
+        .filter(|details| is_float(details.id))
+        .map(|details| details.region)
+        .collect();
+    Some(crate::platform::macos::WebviewPlacement { region, occluders })
 }

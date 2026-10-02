@@ -368,9 +368,22 @@ impl Editor {
                     );
                 }
             }
-            RedrawEvent::WindowPosition { grid, start_row, start_column, width, height } => {
+            RedrawEvent::WindowPosition {
+                grid,
+                window,
+                start_row,
+                start_column,
+                width,
+                height,
+            } => {
                 tracy_zone!("EditorWindowPosition");
-                self.set_window_position(grid, start_column, start_row, width, height)
+                self.set_window_position(grid, start_column, start_row, width, height);
+                if let Some(window) = window {
+                    self.draw_command_batcher.queue(DrawCommand::Window {
+                        grid_id: grid,
+                        command: WindowDrawCommand::Handle(window),
+                    });
+                }
             }
             RedrawEvent::WindowFloatPosition {
                 grid,

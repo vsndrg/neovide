@@ -116,6 +116,17 @@ impl From<&str> for ForceClickKind {
     }
 }
 
+/// Native webviews overlaid on Nvim windows (`neovide.webview.*`). Each webview is identified by
+/// a caller-chosen `id` and follows the pixel rect of the Nvim window `winid`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WebviewCommand {
+    Open { id: u64, winid: u64, url: String },
+    SetWindow { id: u64, winid: u64 },
+    Post { id: u64, message: String },
+    Focus { id: u64, focus: bool },
+    Close { id: u64 },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindowCommand {
     TitleChanged(String),
@@ -144,6 +155,7 @@ pub enum WindowCommand {
     },
     Minimize,
     ThemeChanged(Option<Theme>),
+    Webview(WebviewCommand),
     #[cfg(windows)]
     RegisterRightClick,
     #[cfg(windows)]
