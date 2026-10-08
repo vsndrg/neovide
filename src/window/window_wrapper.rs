@@ -980,6 +980,23 @@ impl WinitWindowWrapper {
             self.keyboard_manager.handle_event(event, neovim_handler);
         }
 
+        // After Nvim was sent the key (see `WebviewManager::key`).
+        #[cfg(target_os = "macos")]
+        if let Some(feature) = &route.window.macos_feature {
+            match event {
+                WindowEvent::KeyboardInput { event: key_event, .. } if !key_event.repeat => {
+                    if let winit::keyboard::PhysicalKey::Code(code) = key_event.physical_key {
+                        feature.borrow_mut().webview_key(
+                            &format!("{code:?}"),
+                            key_event.state == winit::event::ElementState::Pressed,
+                        );
+                    }
+                }
+                WindowEvent::Focused(false) => feature.borrow_mut().release_webview_keys(),
+                _ => {}
+            }
+        }
+
         #[cfg(not(target_os = "macos"))]
         self.keyboard_manager.handle_event(event, neovim_handler);
 

@@ -6,22 +6,26 @@
 //! Page script talks back through `window.webkit.messageHandlers.neovide.postMessage(string)`,
 //! which is forwarded to `neovide.private.webview_message(id, string)` in Nvim.
 //!
-//! Keyboard: while a webview is first responder, only the keys Nvim declared for it (plus
-//! Cmd+C / Cmd+A for selections) reach the page. Every other key event is handed to the editor
-//! view synchronously, so it enters Nvim's input in order with the keys typed after it.
+//! Keyboard: every key goes to Nvim, as in any other window. A webview becomes first responder
+//! only through the mouse (a click, a selection); then Cmd+C / Cmd+A reach the page and every
+//! other key event is handed to the editor view synchronously, so it enters Nvim's input in order
+//! with the keys typed after it. Pages are told when physical keys go down and up
+//! (`{"type":"key","code":"KeyJ","down":true}`, DOM `KeyboardEvent.code` names, no repeats), so
+//! an action started by an Nvim mapping can last exactly as long as its key is held.
 //!
 //! Trackpad: the events of a scroll gesture reach WebKit resampled to the display, one per frame
 //! (see `wheel_resampler`).
 
-use std::{cell::RefCell, collections::HashMap};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
 
 use glamour::Intersection;
 
 use objc2::{
-    DefinedClass, MainThreadOnly, Message, define_class, msg_send,
-    rc::{Retained, Weak},
-    runtime::ProtocolObject,
-    sel,
+    DefinedClass, MainThreadOnly, Message, define_class, msg_send, rc::Retained,
+    runtime::ProtocolObject, sel,
 };
 use objc2_app_kit::{
     NSEvent, NSEventModifierFlags, NSEventPhase, NSResponder, NSScreen, NSView, NSWindow,
@@ -40,7 +44,7 @@ use objc2_web_kit::{
     WKWebViewConfiguration,
 };
 
-use crate::bridge::{NeovimHandler, ParallelCommand, SerialCommand, send_ui};
+use crate::bridge::{NeovimHandler, ParallelCommand, send_ui};
 use crate::units::PixelRect;
 
 const MESSAGE_HANDLER_NAME: &str = "neovide";
@@ -49,7 +53,6 @@ const MESSAGE_HANDLER_NAME: &str = "neovide";
 struct MessageHandlerIvars {
     id: u64,
     neovim_handler: NeovimHandler,
-    ns_window: Weak<NSWindow>,
 }
 
 define_class!(
@@ -75,18 +78,6 @@ define_class!(
             };
             let body = body.to_string();
             let ivars = self.ivars();
-            // `{"type":"blur","key":"<keys>"}` hands the keyboard back to Nvim and replays the key
-            // the page did not handle. Both happen here rather than in Nvim: focus must move
-            // before the next key press arrives, and the replayed key must enter the same ordered
-            // input queue as the keys typed after it.
-            if let Some(key) = parse_blur(&body) {
-                if let Some(ns_window) = ivars.ns_window.load() {
-                    focus_nvim(&ns_window);
-                }
-                if let Some(key) = key {
-                    send_ui(SerialCommand::Keyboard(key), &ivars.neovim_handler);
-                }
-            }
             send_ui(
                 ParallelCommand::WebviewMessage { id: ivars.id, message: body },
                 &ivars.neovim_handler,
@@ -96,28 +87,10 @@ define_class!(
 );
 
 impl WebviewMessageHandler {
-    fn new(
-        mtm: MainThreadMarker,
-        id: u64,
-        neovim_handler: NeovimHandler,
-        ns_window: &NSWindow,
-    ) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(MessageHandlerIvars {
-            id,
-            neovim_handler,
-            ns_window: Weak::from(ns_window),
-        });
+    fn new(mtm: MainThreadMarker, id: u64, neovim_handler: NeovimHandler) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(MessageHandlerIvars { id, neovim_handler });
         unsafe { msg_send![super(this), init] }
     }
-}
-
-/// `Some(key)` for a blur message (`key` is the Nvim key notation to replay, if any).
-fn parse_blur(body: &str) -> Option<Option<String>> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    if value.get("type")?.as_str()? != "blur" {
-        return None;
-    }
-    Some(value.get("key").and_then(|key| key.as_str()).map(str::to_owned))
 }
 
 fn focus_nvim(ns_window: &NSWindow) {
@@ -126,8 +99,8 @@ fn focus_nvim(ns_window: &NSWindow) {
     }
 }
 
-/// A key the page receives: a macOS virtual key code plus exact modifiers. Letters are matched by
-/// physical key (ANSI positions), so they work in any keyboard layout.
+/// A key the page receives while it is first responder: a macOS virtual key code plus exact
+/// modifiers. Letters are matched by physical key (ANSI positions), so they work in any layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct KeySpec {
     code: u16,
@@ -199,16 +172,13 @@ impl KeySpec {
     }
 }
 
-/// Selection editing works in any focused webview.
+/// The only keys a webview handles itself: copying and selecting text selected with the mouse.
 fn selection_keys() -> [KeySpec; 2] {
     [KeySpec::parse("<D-c>").unwrap(), KeySpec::parse("<D-a>").unwrap()]
 }
 
 #[derive(Debug)]
 struct KeyRoutingIvars {
-    id: u64,
-    neovim_handler: NeovimHandler,
-    page_keys: RefCell<Vec<KeySpec>>,
     wheel: RefCell<WheelGesture>,
 }
 
@@ -251,24 +221,6 @@ define_class!(
             }
         }
 
-        // Nvim tracks whether the page has the keyboard; tell it whenever that ends, whatever
-        // the cause (a key routed to Nvim, a click on the editor, focus(false)).
-        #[unsafe(method(resignFirstResponder))]
-        fn resign_first_responder(&self) -> bool {
-            let resigned: bool = unsafe { msg_send![super(self), resignFirstResponder] };
-            if resigned {
-                self.set_page_keys(Vec::new());
-                send_ui(
-                    ParallelCommand::WebviewMessage {
-                        id: self.ivars().id,
-                        message: r#"{"type":"blur"}"#.to_owned(),
-                    },
-                    &self.ivars().neovim_handler,
-                );
-            }
-            resigned
-        }
-
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
             self.on_scroll_wheel(event);
@@ -293,28 +245,14 @@ define_class!(
 );
 
 impl KeyRoutingWebView {
-    fn new(
-        mtm: MainThreadMarker,
-        configuration: &WKWebViewConfiguration,
-        id: u64,
-        neovim_handler: NeovimHandler,
-    ) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(KeyRoutingIvars {
-            id,
-            neovim_handler,
-            page_keys: RefCell::new(Vec::new()),
-            wheel: RefCell::new(WheelGesture::default()),
-        });
+    fn new(mtm: MainThreadMarker, configuration: &WKWebViewConfiguration) -> Retained<Self> {
+        let this = Self::alloc(mtm)
+            .set_ivars(KeyRoutingIvars { wheel: RefCell::new(WheelGesture::default()) });
         unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO, configuration: configuration] }
     }
 
     fn routes_to_page(&self, event: &NSEvent) -> bool {
         selection_keys().iter().any(|key| key.matches(event))
-            || self.ivars().page_keys.borrow().iter().any(|key| key.matches(event))
-    }
-
-    fn set_page_keys(&self, keys: Vec<KeySpec>) {
-        *self.ivars().page_keys.borrow_mut() = keys;
     }
 
     fn is_first_responder(&self) -> bool {
@@ -622,6 +560,8 @@ fn subtract_rects(bounds: NSRect, holes: &[NSRect]) -> Vec<NSRect> {
 #[derive(Debug, Default)]
 pub struct WebviewManager {
     panes: HashMap<u64, Pane>,
+    /// Physical keys down in the editor (DOM `code` names), released on focus loss.
+    pressed: HashSet<String>,
 }
 
 impl WebviewManager {
@@ -643,7 +583,7 @@ impl WebviewManager {
             return;
         };
 
-        let handler = WebviewMessageHandler::new(mtm, id, neovim_handler.clone(), ns_window);
+        let handler = WebviewMessageHandler::new(mtm, id, neovim_handler.clone());
         let view = unsafe {
             let configuration = WKWebViewConfiguration::new(mtm);
             // WebKit throttles page rendering updates (rAF, scroll commits) to ~60 fps even on
@@ -653,7 +593,7 @@ impl WebviewManager {
                 ProtocolObject::from_ref(&*handler),
                 &NSString::from_str(MESSAGE_HANDLER_NAME),
             );
-            let view = KeyRoutingWebView::new(mtm, &configuration, id, neovim_handler.clone());
+            let view = KeyRoutingWebView::new(mtm, &configuration);
             // Let the window background (drawn by Neovide) show until the page paints.
             let _: () = msg_send![&view, setValue: &*NSNumber::new_bool(false), forKey: ns_string!("drawsBackground")];
             view.setInspectable(true);
@@ -674,40 +614,33 @@ impl WebviewManager {
     }
 
     pub fn post(&self, id: u64, message: &str) {
-        let Some(pane) = self.panes.get(&id) else {
-            return;
-        };
-        // A JSON string literal is a valid JS string literal.
-        let literal = serde_json::to_string(message).unwrap_or_default();
-        let script = format!("window.neovideReceive && window.neovideReceive({literal})");
-        unsafe {
-            pane.view.evaluateJavaScript_completionHandler(&NSString::from_str(&script), None);
+        if let Some(pane) = self.panes.get(&id) {
+            post_to(&pane.view, message);
         }
     }
 
-    /// `keys` (Nvim key notation) are delivered to the page while it has focus; all other keys
-    /// return focus to Nvim.
-    pub fn focus(&self, ns_window: &NSWindow, id: u64, focus: bool, keys: &[String]) {
-        match self.panes.get(&id) {
-            Some(pane) if focus => {
-                let specs = keys
-                    .iter()
-                    .filter_map(|key| {
-                        let spec = KeySpec::parse(key);
-                        if spec.is_none() {
-                            log::warn!("webview: unsupported key {key:?}");
-                        }
-                        spec
-                    })
-                    .collect();
-                pane.view.set_page_keys(specs);
-                ns_window.makeFirstResponder(Some(&*pane.view));
-            }
-            Some(pane) => {
-                pane.view.set_page_keys(Vec::new());
-                focus_nvim(ns_window);
-            }
-            None => focus_nvim(ns_window),
+    /// A physical key (DOM `code` name) went down or up in the editor; key repeats are not
+    /// reported. Every page hears of it, after Nvim was sent the key: a page acting on what Nvim
+    /// makes of the key always knows by then that it went down.
+    pub fn key(&mut self, code: &str, down: bool) {
+        let changed =
+            if down { self.pressed.insert(code.to_owned()) } else { self.pressed.remove(code) };
+        if changed {
+            self.post_key(code, down);
+        }
+    }
+
+    /// The window lost focus: its key ups will not arrive.
+    pub fn release_keys(&mut self) {
+        for code in std::mem::take(&mut self.pressed) {
+            self.post_key(&code, false);
+        }
+    }
+
+    fn post_key(&self, code: &str, down: bool) {
+        let message = serde_json::json!({ "type": "key", "code": code, "down": down }).to_string();
+        for pane in self.panes.values() {
+            post_to(&pane.view, &message);
         }
     }
 
@@ -804,6 +737,15 @@ fn set_webkit_feature(configuration: &WKWebViewConfiguration, key: &str, enabled
     log::warn!("webview: WebKit feature {key} not found");
 }
 
+fn post_to(view: &WKWebView, message: &str) {
+    // A JSON string literal is a valid JS string literal.
+    let literal = serde_json::to_string(message).unwrap_or_default();
+    let script = format!("window.neovideReceive && window.neovideReceive({literal})");
+    unsafe {
+        view.evaluateJavaScript_completionHandler(&NSString::from_str(&script), None);
+    }
+}
+
 fn load_file(view: &WKWebView, path: &str) {
     let url = NSURL::fileURLWithPath(&NSString::from_str(path));
     // Read access to the whole file system: pages reference images next to the documents
@@ -879,13 +821,5 @@ mod tests {
         assert_eq!(KeySpec::parse("<Esc>").unwrap().code, 53);
         assert!(KeySpec::parse("<X-j>").is_none());
         assert!(KeySpec::parse("<F13>").is_none());
-    }
-
-    #[test]
-    fn parse_blur_extracts_replay_key() {
-        assert_eq!(parse_blur(r#"{"type":"blur","key":"<Space>"}"#), Some(Some("<Space>".into())));
-        assert_eq!(parse_blur(r#"{"type":"blur"}"#), Some(None));
-        assert_eq!(parse_blur(r#"{"type":"click","line":3}"#), None);
-        assert_eq!(parse_blur("not json"), None);
     }
 }

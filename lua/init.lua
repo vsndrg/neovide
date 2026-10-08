@@ -315,8 +315,9 @@ end
 -- moved with it every frame, hidden while the window is not displayed, and masked below floating
 -- windows. Page script receives messages through `window.neovideReceive(string)` and replies with
 -- `window.webkit.messageHandlers.neovide.postMessage(string)`, delivered to `on_message[id]`.
--- The message `{"type":"blur","key":"<keys>"}` is also handled by Neovide itself: keyboard focus
--- returns to Nvim and `key` (optional, Nvim key notation) is fed to Nvim in order with typed keys.
+-- Keys always go to Nvim. Pages also receive `{"type":"key","code":"KeyJ","down":true}` whenever
+-- a physical key (DOM `KeyboardEvent.code` name) goes down or up in the editor, without repeats,
+-- after Nvim was sent the key: an action a mapping starts can last as long as its key is held.
 M.webview = {
     ---@type table<integer, fun(message: string)>
     on_message = {},
@@ -339,15 +340,6 @@ end
 ---@param message string
 M.webview.post = function(id, message)
     pcall(rpcnotify, "neovide.webview.post", id, message)
-end
-
----@param id integer
----@param focus boolean give keyboard focus to the webview (true) or back to Nvim (false)
----@param keys? string[] keys (Nvim notation, e.g. "j", "G", "<PageDown>") the page receives while
----  focused; any other key returns focus to Nvim and is processed there. Cmd+C/Cmd+A always
----  reach the page.
-M.webview.focus = function(id, focus, keys)
-    pcall(rpcnotify, "neovide.webview.focus", id, focus, keys or {})
 end
 
 ---@param id integer
