@@ -1,5 +1,6 @@
 use std::{
     cell::RefCell,
+    collections::HashSet,
     fmt,
     mem::take,
     path::{Path, PathBuf},
@@ -22,9 +23,9 @@ use approx::AbsDiffEq;
 #[cfg(target_os = "windows")]
 use super::settings::CornerPreference;
 use super::{
-    EventPayload, EventTarget, KeyboardManager, MessageSelectionEvent, MouseManager, OverlayEvent,
-    ProgressBarUpdate, RouteId, UserEvent, WindowCommand, WindowSettings, WindowSettingsChanged,
-    WindowSize,
+    EventPayload, EventTarget, KeyReleases, KeyboardManager, MessageSelectionEvent, MouseManager,
+    OverlayEvent, ProgressBarUpdate, RouteId, UserEvent, WindowCommand, WindowSettings,
+    WindowSettingsChanged, WindowSize,
 };
 
 #[cfg(target_os = "macos")]
@@ -152,6 +153,7 @@ pub struct RouteWindow {
     pub winit_window: Rc<Window>,
     pub neovim_handler: NeovimHandler,
     pub mouse_manager: Rc<RefCell<Box<MouseManager>>>,
+    pub key_releases: KeyReleases,
     pub renderer: Rc<RefCell<Box<Renderer>>>,
     #[cfg(target_os = "macos")]
     pub macos_feature: Option<Rc<RefCell<Box<MacosWindowFeature>>>>,
@@ -235,6 +237,7 @@ struct RouteCore {
     #[cfg(target_os = "macos")]
     document_modified: bool,
     mouse_enabled: bool,
+    watched_key_releases: HashSet<String>,
     pending_initial_window_size: Option<WindowSize>,
     last_synced_grid_size: Option<GridSize<u32>>,
     inferred_theme: Option<Theme>,
@@ -379,6 +382,7 @@ impl WinitWindowWrapper {
                 #[cfg(target_os = "macos")]
                 document_modified: false,
                 mouse_enabled: true,
+                watched_key_releases: HashSet::new(),
                 pending_initial_window_size,
                 last_synced_grid_size: None,
                 inferred_theme: None,
@@ -540,6 +544,11 @@ impl WinitWindowWrapper {
                 }
             }
             WindowCommand::ListAvailableFonts => self.send_font_names(target_window_id),
+            WindowCommand::WatchKeyReleases(keys) => {
+                if let Some(route) = self.routes.get_mut(&target_window_id) {
+                    route.window.key_releases.watch(keys.into_iter().collect());
+                }
+            }
             WindowCommand::FocusWindow => {
                 if let Some(route) = &self.routes.get(&target_window_id) {
                     let window = route.window.winit_window.clone();
@@ -669,6 +678,9 @@ impl WinitWindowWrapper {
             }
             WindowCommand::SetMouseEnabled(mouse_enabled) => {
                 route_core.mouse_enabled = mouse_enabled;
+            }
+            WindowCommand::WatchKeyReleases(keys) => {
+                route_core.watched_key_releases = keys.into_iter().collect();
             }
             WindowCommand::ThemeChanged(new_theme) => {
                 route_core.inferred_theme = new_theme;
@@ -976,9 +988,14 @@ impl WinitWindowWrapper {
         };
 
         #[cfg(target_os = "macos")]
-        if !consumed_key_event {
-            self.keyboard_manager.handle_event(event, neovim_handler);
-        }
+        let sent_key = if consumed_key_event {
+            None
+        } else {
+            self.keyboard_manager.handle_event(event, neovim_handler)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let sent_key = self.keyboard_manager.handle_event(event, neovim_handler);
+        route.window.key_releases.handle_event(event, sent_key.as_deref(), neovim_handler);
 
         // After Nvim was sent the key (see `WebviewManager::key`).
         #[cfg(target_os = "macos")]
@@ -996,9 +1013,6 @@ impl WinitWindowWrapper {
                 _ => {}
             }
         }
-
-        #[cfg(not(target_os = "macos"))]
-        self.keyboard_manager.handle_event(event, neovim_handler);
 
         {
             let mut renderer = route.window.renderer.borrow_mut();
@@ -1608,6 +1622,7 @@ impl WinitWindowWrapper {
         let mut route_last_synced_grid_size = None;
         let mut route_inferred_theme = None;
         let mut route_mouse_enabled = true;
+        let mut route_watched_key_releases = HashSet::new();
         let mut should_apply_initial_window_size = false;
         let mut route_font_changed_last_frame = false;
 
@@ -1657,6 +1672,7 @@ impl WinitWindowWrapper {
                 route_last_synced_grid_size = route_core.last_synced_grid_size;
                 route_inferred_theme = route_core.inferred_theme;
                 route_mouse_enabled = route_core.mouse_enabled;
+                route_watched_key_releases = route_core.watched_key_releases;
                 should_apply_initial_window_size = route_core.should_show_observed;
                 route_font_changed_last_frame = route_core.font_changed_last_frame;
                 (
@@ -1869,6 +1885,7 @@ impl WinitWindowWrapper {
                 winit_window: window.clone(),
                 neovim_handler,
                 mouse_manager: Rc::new(RefCell::new(Box::new(mouse_manager))),
+                key_releases: KeyReleases::new(route_watched_key_releases),
                 #[cfg(target_os = "macos")]
                 macos_feature: Some(Rc::new(RefCell::new(Box::new(macos_feature)))),
                 title: route_title,

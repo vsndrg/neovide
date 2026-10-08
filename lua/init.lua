@@ -355,6 +355,28 @@ M.private.webview_message = function(id, message)
     end
 end
 
+-- Nvim only gets key presses. `on_key_release(key, callback)` calls `callback(held_ms)` when the
+-- key goes up: `key` as Neovide sends it to Nvim on the press (e.g. "<C-m>"), `held_ms` how long it
+-- was down. Key repeats are not presses. A key still down when the window loses focus counts as
+-- released then. Releases go through the same queue as key input, so Nvim has handled the press
+-- and its repeats before the callback runs. A nil `callback` stops watching the key.
+---@type table<string, fun(held_ms: integer)>
+local key_release_callbacks = {}
+
+---@param key string
+---@param callback fun(held_ms: integer)|nil
+M.on_key_release = function(key, callback)
+    key_release_callbacks[key] = callback
+    pcall(rpcnotify, "neovide.watch_key_releases", vim.tbl_keys(key_release_callbacks))
+end
+
+M.private.key_released = function(key, held_ms)
+    local callback = key_release_callbacks[key]
+    if callback then
+        callback(held_ms)
+    end
+end
+
 M.disable_redraw = function()
     -- Wrap inside pcall to avoid errors if Neovide disconnects
     pcall(rpcnotify, "neovide.set_redraw", false)

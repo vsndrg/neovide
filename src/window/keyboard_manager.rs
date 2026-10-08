@@ -46,7 +46,12 @@ impl KeyboardManager {
         self.modifiers
     }
 
-    pub fn handle_event(&mut self, event: &WindowEvent, neovim_handler: &NeovimHandler) {
+    /// Returns the key a key press sent to Nvim.
+    pub fn handle_event(
+        &mut self,
+        event: &WindowEvent,
+        neovim_handler: &NeovimHandler,
+    ) -> Option<String> {
         match event {
             WindowEvent::KeyboardInput { event: key_event, is_synthetic: false, .. }
                 if self.ime_preedit.0.is_empty() =>
@@ -57,7 +62,8 @@ impl KeyboardManager {
                 {
                     log::trace!("Key pressed {} {:?}", text, self.modifiers.state());
                     tracy_named_frame!("keyboard input");
-                    send_ui(SerialCommand::Keyboard(text), neovim_handler);
+                    send_ui(SerialCommand::Keyboard(text.clone()), neovim_handler);
+                    return Some(text);
                 }
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
@@ -107,6 +113,7 @@ impl KeyboardManager {
             }
             _ => {}
         }
+        None
     }
 
     fn handle_numpad_numkey<'a>(

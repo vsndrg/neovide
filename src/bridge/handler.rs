@@ -294,6 +294,12 @@ impl Handler for NeovimHandler {
                     None => warn!("{name} called with invalid arguments: {arguments:?}"),
                 }
             }
+            "neovide.watch_key_releases" => match parse_key_list(&arguments) {
+                Some(keys) => self.send_window_command(WindowCommand::WatchKeyReleases(keys)),
+                None => {
+                    warn!("neovide.watch_key_releases called with invalid arguments: {arguments:?}")
+                }
+            },
             "neovide.exec_detach_handler" => {
                 send_ui(ParallelCommand::Quit, self);
             }
@@ -367,6 +373,13 @@ fn parse_webview_command(action: &str, arguments: &[Value]) -> Option<WebviewCom
         "close" => WebviewCommand::Close { id },
         _ => return None,
     })
+}
+
+fn parse_key_list(arguments: &[Value]) -> Option<Vec<String>> {
+    let [Value::Array(keys), ..] = arguments else {
+        return None;
+    };
+    keys.iter().map(|key| key.as_str().map(str::to_owned)).collect()
 }
 
 #[cfg(target_os = "macos")]

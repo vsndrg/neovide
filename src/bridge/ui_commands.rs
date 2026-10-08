@@ -152,6 +152,11 @@ pub enum SerialCommand {
     },
     #[cfg(target_os = "macos")]
     ForceClickCommand,
+    /// A watched key went up (`neovide.on_key_release`).
+    KeyReleased {
+        key: String,
+        held_ms: u64,
+    },
 }
 
 impl SerialCommand {
@@ -256,6 +261,11 @@ impl SerialCommand {
             SerialCommand::ForceClickCommand => {
                 nvim.command("NeovideForceClick").await.context("Force click command failed")
             }
+            SerialCommand::KeyReleased { key, held_ms } => nvim
+                .exec_lua("neovide.private.key_released(...)", call_args![key, held_ms as i64])
+                .await
+                .map(|_| ())
+                .context("KeyReleased failed"),
         };
 
         if let Err(error) = result {

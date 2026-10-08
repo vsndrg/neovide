@@ -1,5 +1,6 @@
 mod application;
 mod error_window;
+mod key_releases;
 mod keyboard_manager;
 #[cfg(target_os = "macos")]
 pub mod macos;
@@ -35,6 +36,7 @@ use winit::platform::windows::WindowAttributesExtWindows;
 use winit::platform::macos::EventLoopBuilderExtMacOS;
 
 use image::{GenericImageView, Pixel, load_from_memory};
+use key_releases::KeyReleases;
 use keyboard_manager::KeyboardManager;
 use mouse_manager::MouseManager;
 use std::fs::File;
@@ -155,6 +157,8 @@ pub enum WindowCommand {
     Minimize,
     ThemeChanged(Option<Theme>),
     Webview(WebviewCommand),
+    /// Keys whose releases are reported to Nvim (`neovide.on_key_release`).
+    WatchKeyReleases(Vec<String>),
     #[cfg(windows)]
     RegisterRightClick,
     #[cfg(windows)]
